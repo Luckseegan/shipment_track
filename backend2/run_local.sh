@@ -1,3 +1,3 @@
 #!/bin/bash
 export SSL_CERT_FILE=$(python -c "import certifi; print(certifi.where())")
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
