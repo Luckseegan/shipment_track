@@ -1,5 +1,6 @@
 from rapidfuzz import fuzz
 import re
+import logging
 from dateutil import parser
 from datetime import datetime
 import pandas as pd
@@ -26,11 +27,10 @@ def clean_vessel_name(v: Optional[str]) -> str:
     # remove common prefixes
     s = re.sub(r'\b(MV|M\/V|S\/V|MT|HSC|MS|MTS)\b', ' ', s)
     s = re.sub(r'\b(VOY|VOYAGE|V\.|VOY#|VOYAGE#)\b', ' ', s)
-    # remove tokens like V.034, -034, /034, 001E
-    s = re.sub(r'[\-\/\.#]?\s*\d+[A-Z]*', ' ', s)
+    # keep numeric tokens (they can be useful), remove only punctuation
     s = re.sub(r'[^A-Z0-9 ]', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
-    return s.replace(" ", "")
+    return s
 
 def clean_vessel_compact(v: Optional[str]) -> str:
     if not v:
@@ -38,11 +38,58 @@ def clean_vessel_compact(v: Optional[str]) -> str:
     return re.sub(r'[^A-Z0-9]', '', str(v).upper())
 
 def similarity_score(a: str, b: str) -> float:
+    """Compute a robust similarity score between two vessel name strings.
+
+    Uses multiple fuzzy metrics across different normalizations and adds
+    a prefix token bonus when initial name tokens (e.g., carrier/brand)
+    match exactly. Returns 0-100.
+    """
+    logger = logging.getLogger(__name__)
     if not a or not b:
         return 0.0
-    s1 = fuzz.token_sort_ratio(a, b)
-    s2 = fuzz.partial_ratio(a, b)
-    return max(s1, s2)
+
+    # Prepare normalized variants
+    def normalize_keep_spaces(s: str) -> str:
+        return re.sub(r'\s+', ' ', re.sub(r'[^A-Z0-9 ]', ' ', s.upper())).strip()
+
+    def normalize_compact(s: str) -> str:
+        return re.sub(r'[^A-Z0-9]', '', s.upper())
+
+    a1 = normalize_keep_spaces(a)
+    b1 = normalize_keep_spaces(b)
+    a_compact = normalize_compact(a)
+    b_compact = normalize_compact(b)
+
+    try:
+        scores = [
+            fuzz.token_sort_ratio(a1, b1),
+            fuzz.token_set_ratio(a1, b1),
+            fuzz.partial_ratio(a1, b1),
+            fuzz.partial_ratio(a_compact, b_compact),
+            fuzz.ratio(a_compact, b_compact),
+        ]
+    except Exception:
+        logger.exception("Error computing fuzzy scores")
+        return 0.0
+
+    base_score = max(scores)
+
+    # Bonus when the first 1-2 alphabetic tokens match (e.g., "WAN HAI")
+    def first_alpha_tokens(s: str, n: int = 2) -> str:
+        toks = [t for t in re.split(r'[^A-Z]+', s.upper()) if t]
+        alpha = [t for t in toks if re.match(r'^[A-Z]+$', t)]
+        return ' '.join(alpha[:n])
+
+    bonus = 0
+    if first_alpha_tokens(a1, 2) and first_alpha_tokens(a1, 2) == first_alpha_tokens(b1, 2):
+        bonus += 18
+
+    # Exact compact match is a strong signal
+    if a_compact == b_compact and a_compact:
+        bonus += 22
+
+    final = min(100.0, float(base_score) + bonus)
+    return final
 
 def row_to_json_safe(row: pd.Series) -> dict:
     out = {}
